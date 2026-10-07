@@ -1,0 +1,57 @@
+name: Fixed release controls canary
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        type: choice
+        required: true
+        options: [baseline, denial, environment]
+      other-sha:
+        type: string
+        required: true
+      cutoff-epoch-ms:
+        type: string
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: fixed-release-controls-canary
+  cancel-in-progress: false
+jobs:
+  unprotected:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Authenticate fixed repo and bounded phase
+        env:
+          CANARY_PHASE: ${{ inputs.phase }}
+          CANARY_OTHER_SHA: ${{ inputs.other-sha }}
+          CANARY_CUTOFF_EPOCH_MS: ${{ inputs.cutoff-epoch-ms }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REPOSITORY" = 'Melbourneandrew/agentscope-release-controls-canary-rk86-20261007-a81d3f29'
+          case "$CANARY_PHASE" in baseline|denial) ;; environment) exit 0 ;; *) exit 1 ;; esac
+          # Exact reviewed bot bytes installed beside this workflow. Retrieve
+          # only at GITHUB_SHA, never current main or caller-specified URL.
+          node --input-type=module -e '
+            const url = "https://api.github.com/repos/" + process.env.GITHUB_REPOSITORY + "/contents/.canary/bot.mjs?ref=" + process.env.GITHUB_SHA;
+            const remaining=Number(process.env.CANARY_CUTOFF_EPOCH_MS)-Date.now();if(!Number.isSafeInteger(remaining)||remaining<=0||remaining>600000)throw Error("canary.bound");
+            const r = await fetch(url, { redirect:"error", signal:AbortSignal.timeout(remaining), headers:{Authorization:"Bearer " + process.env.GITHUB_TOKEN,Accept:"application/vnd.github.raw+json"}});
+            if(r.status!==200)throw Error("canary.source");
+            const reader=r.body?.getReader();if(!reader)throw Error("canary.source");const chunks=[];let size=0;
+            try{for(;;){const p=await reader.read();if(p.done)break;size+=p.value.byteLength;if(size>16384||Date.now()>=Number(process.env.CANARY_CUTOFF_EPOCH_MS))throw Error("canary.source");chunks.push(Buffer.from(p.value));}}finally{await reader.cancel();reader.releaseLock();}
+            const b=Buffer.concat(chunks,size);
+            const fs=await import("node:fs");fs.writeFileSync("/tmp/canary-bot.mjs",b,{flag:"wx"});
+          '
+          node /tmp/canary-bot.mjs
+  protected:
+    if: inputs.phase == 'environment'
+    needs: unprotected
+    environment: npm-release
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Protected output marker
+        run: printf '%s\n' 'CANARY_PROTECTED_ENTRY_V1'
